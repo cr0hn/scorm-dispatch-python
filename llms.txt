@@ -1,0 +1,79 @@
+# scorm-dispatch-client
+
+> Async Python client (3.14+, httpx2, pydantic) for the scorm-dispatch API: build SCORM 1.2/2004 zips
+> from a neutral JSON course, manage partners and assets, read usage reports, call the runtime endpoint.
+
+Install: `pip install scorm-dispatch-client`. Import: `from scorm_dispatch import Client, ScormDispatchError`.
+Everything is `async`. Contract: `spec/openapi.yaml`. Human docs: README.md.
+
+## Client
+
+`Client(base_url: str, admin_key: str, *, http_client: httpx2.AsyncClient | None = None, timeout: float = 30.0)`
+Use `async with Client(...) as sd:` or call `await sd.aclose()`. An injected `http_client` is never closed
+by the client. The admin key goes in `Authorization: Bearer` on admin routes only (never on runtime/health).
+The client does not retry.
+
+## Methods (request bodies are TypedDicts with camelCase keys; responses have snake_case attributes)
+
+- `await put_partner(partner_id: str, partner: PartnerInput) -> Partner` upsert. PartnerInput keys:
+  name, contactEmail, seatCap (int), allowedOrigins (list of "scheme://host[:port]", no path), active (bool).
+  Partner attrs: partner_id, name, contact_email, seat_cap, allowed_origins, active, created_at, updated_at.
+- `await get_partner(partner_id) -> Partner`
+- `await list_partners(*, limit=50, offset=0) -> PartnerList` (.items, .total; limit 1-200)
+- `await put_asset(asset_key: str, asset: AssetInput) -> Asset` upsert. AssetInput: {"kind": "video"|"file",
+  "uri": "stream-bunny://<guid>" | "s3://bucket/key" | "bunny-s3://bucket/key" | "bunny-storage://path"}.
+  Asset attrs: asset_key, asset_id (opaque, stable), kind, uri, created_at, updated_at.
+- `await get_asset(asset_key) -> Asset`
+- `await create_package(partner_id, scorm_version: "1.2"|"2004", course: Course) -> bytes` the zip.
+- `await get_usage_report(month: "YYYY-MM") -> UsageReport` (.month, .partners[].partner_id/name/seat_cap/
+  active_learners/rejected_origins[].origin/count)
+- `await get_usage_report_csv(month) -> str`
+- `await get_runtime_asset(asset_id, *, partner, learner, origin) -> RuntimeAsset` (.kind, .url, .expires_at).
+  Public route; sends `Origin: <origin>`. Normally called by browsers, from the package.
+- `await healthz() -> None`, `await readyz() -> None`: raise ScormDispatchError when not ok (readyz 503 = DB down).
+
+## Course (the neutral format)
+
+{"id", "title", "version", "language" (BCP 47, e.g. "en"), "modules": [{"title", "lessons": [lesson]}]}.
+Lesson, by "type": text {id,title,type,html}; video {id,title,type,assetKey}; file {id,title,type,assetKey,fileName};
+quiz {id,title,type,quiz:{final,passingScore 0-100,questions:[{id,type "single"|"multiple",promptHtml,
+options:[{id,html}],correct:[option ids]}]}}. Ids match ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$. Unknown fields are
+rejected (422). Every assetKey must be registered first with put_asset.
+
+## Errors
+
+Every non-2xx raises `ScormDispatchError` with `.status` (int), `.problem` (Problem: type, title, status,
+detail, errors), `.field_errors` (list of FieldError(path, message); 422 only) and `.retry_after`
+(int seconds or None; 429). 400 malformed, 401 bad key, 403 runtime origin/partner refused, 404 not found,
+409 asset kind change, 413 package too large, 422 validation, 429 rate limit, 5xx server. Transport failures
+are httpx2 exceptions, not wrapped.
+
+## Full example
+
+```python
+import asyncio
+from scorm_dispatch import Client, ScormDispatchError
+
+async def main() -> None:
+    async with Client("https://scorm.example.com", "ADMIN_API_KEY", timeout=30) as sd:
+        await sd.put_partner("northwind", {
+            "name": "Northwind Academy", "contactEmail": "learning@northwind.example",
+            "seatCap": 500, "allowedOrigins": ["https://lms.northwind.example"], "active": True})
+        await sd.put_asset("vid-1", {"kind": "video", "uri": "stream-bunny://6f1c2a9e"})
+        course = {"id": "intro", "title": "Intro", "version": "1", "language": "en",
+                  "modules": [{"title": "Start", "lessons": [
+                      {"id": "l1", "title": "Hi", "type": "text", "html": "<p>Hi</p>"},
+                      {"id": "l2", "title": "Video", "type": "video", "assetKey": "vid-1"}]}]}
+        try:
+            data = await sd.create_package("northwind", "2004", course)
+        except ScormDispatchError as e:
+            if e.status == 422:
+                for f in e.field_errors:
+                    print(f.path, f.message)
+            raise
+        open("intro.zip", "wb").write(data)
+        report = await sd.get_usage_report("2026-11")
+        print([(p.partner_id, p.active_learners) for p in report.partners])
+
+asyncio.run(main())
+```

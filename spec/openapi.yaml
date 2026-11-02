@@ -1,0 +1,1274 @@
+openapi: 3.0.3
+info:
+  title: scorm-dispatch API
+  version: 1.0.0
+  description: |
+    scorm-dispatch turns a course described in a neutral JSON format into a
+    lightweight SCORM 1.2 or SCORM 2004 package, and, while learners take the
+    course, validates the content partner by its id and `Origin`, counts active
+    learners per month and hands out short-lived signed URLs for videos and
+    files. No media bytes ever pass through this service.
+
+    One deployment serves one content owner. Errors follow RFC 9457
+    (`application/problem+json`).
+
+    * **Admin** endpoints need `Authorization: Bearer <ADMIN_API_KEY>`.
+    * **Runtime** endpoints are public; they are called from the browser by the
+      JavaScript inside the package, and CORS is granted only to the
+      `allowedOrigins` of the partner.
+  license:
+    name: Proprietary
+servers:
+  - url: https://scorm.mycompany.test
+    description: A scorm-dispatch deployment (its `PUBLIC_BASE_URL`).
+tags:
+  - name: Partners
+    description: Organisations allowed to host packages. Admin only.
+  - name: Assets
+    description: Videos and files that packages reference by key. Admin only.
+  - name: Packages
+    description: SCORM package generation. Admin only.
+  - name: Reports
+    description: Usage reports. Admin only.
+  - name: Runtime
+    description: Public calls made by the JavaScript inside a package.
+  - name: Operations
+    description: Health checks and self-description.
+
+paths:
+  /v1/partners:
+    get:
+      tags: [Partners]
+      operationId: listPartners
+      summary: List partners
+      description: Returns partners ordered by `partnerId`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A page of partners.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/partners/{partnerId}:
+    parameters:
+      - $ref: "#/components/parameters/PartnerId"
+    get:
+      tags: [Partners]
+      operationId: getPartner
+      summary: Get a partner
+      description: Returns one partner.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The partner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Partner"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      tags: [Partners]
+      operationId: putPartner
+      summary: Create or update a partner
+      description: |
+        Idempotent upsert. Returns 201 when the partner is created and 200 when
+        an existing one is replaced. The body replaces every field.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartnerInput"
+            example:
+              name: Northwind Academy
+              contactEmail: learning@northwind.example
+              seatCap: 500
+              allowedOrigins:
+                - https://lms.northwind.example
+              active: true
+      responses:
+        "200":
+          description: An existing partner was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Partner"
+        "201":
+          description: The partner was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Partner"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/assets/{assetKey}:
+    parameters:
+      - $ref: "#/components/parameters/AssetKey"
+    get:
+      tags: [Assets]
+      operationId: getAsset
+      summary: Get an asset
+      description: Returns one asset, including its opaque `assetId`.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The asset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      tags: [Assets]
+      operationId: putAsset
+      summary: Register or change an asset
+      description: |
+        Idempotent upsert. The `assetId` is generated on first registration and
+        never changes afterwards, so packages already in circulation keep
+        working when the URI changes. Returns 201 on creation, 200 on update.
+        The scheme of `uri` selects the storage: `stream-bunny://` (video library),
+        `s3://` (object storage), `bunny-s3://` (Bunny S3-compatible storage) or `bunny-storage://` (CDN storage). A storage
+        that is not configured in this deployment, or an object that does not
+        exist, yields 422. Changing the `kind` of an asset that already exists
+        yields 409, because packages in circulation depend on it.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetInput"
+            examples:
+              video:
+                summary: A video in the stream library
+                value:
+                  kind: video
+                  uri: stream-bunny://6f1c2a9e-5b7d-4c0e-9a41-2d8f3b7e1a55
+              file:
+                summary: A PDF in object storage
+                value:
+                  kind: file
+                  uri: s3://course-files/guides/getting-started.pdf
+      responses:
+        "200":
+          description: An existing asset was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "201":
+          description: The asset was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/packages:
+    post:
+      tags: [Packages]
+      operationId: createPackage
+      summary: Generate a SCORM package
+      description: |
+        Validates the course, sanitises the HTML of text lessons, quiz prompts
+        and options, and returns a ZIP ready to import into any SCORM LMS.
+        Every `assetKey` used by the course must be registered; otherwise the
+        response is 422 and lists each missing key in `errors`. The partner must
+        exist and be active.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PackageRequest"
+            example:
+              partnerId: northwind
+              scormVersion: "2004"
+              course:
+                id: intro-to-safety
+                title: Introduction to workplace safety
+                version: "3"
+                language: en
+                modules:
+                  - title: Getting started
+                    lessons:
+                      - id: l1
+                        title: Welcome
+                        type: text
+                        html: "<p>Welcome to the course.</p>"
+                      - id: l2
+                        title: Safety walkthrough
+                        type: video
+                        assetKey: vid-walkthrough
+                      - id: l3
+                        title: Checklist
+                        type: file
+                        assetKey: pdf-checklist
+                        fileName: checklist.pdf
+                      - id: l4
+                        title: Final exam
+                        type: quiz
+                        quiz:
+                          final: true
+                          passingScore: 70
+                          questions:
+                            - id: q1
+                              type: single
+                              promptHtml: "<p>Where is the assembly point?</p>"
+                              options:
+                                - id: a
+                                  html: Car park
+                                - id: b
+                                  html: Main lobby
+                              correct: [a]
+                            - id: q2
+                              type: multiple
+                              promptHtml: "<p>Which of these are fire exits?</p>"
+                              options:
+                                - id: a
+                                  html: North door
+                                - id: b
+                                  html: Lift
+                                - id: c
+                                  html: South stairs
+                              correct: [a, c]
+      responses:
+        "200":
+          description: The SCORM package.
+          headers:
+            Content-Disposition:
+              description: Suggested file name of the package.
+              schema:
+                type: string
+                example: attachment; filename="intro-to-safety-3-scorm2004.zip"
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/reports/usage:
+    get:
+      tags: [Reports]
+      operationId: getUsageReport
+      summary: Monthly usage report
+      description: |
+        Active learners and rejected origins per partner for one month. The
+        representation is chosen with the `Accept` header: `application/json`
+        (default) or `text/csv`. The CSV has one row per partner with the header
+        `partner_id,partner_name,seat_cap,active_learners,rejected_origins`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: month
+          in: query
+          required: true
+          description: Calendar month, `YYYY-MM`.
+          schema:
+            type: string
+            pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$'
+            example: "2026-11"
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageReport"
+            text/csv:
+              schema:
+                type: string
+                description: CSV with a header row; fields are RFC 4180 quoted.
+              example: |
+                partner_id,partner_name,seat_cap,active_learners,rejected_origins
+                northwind,Northwind Academy,500,312,4
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/runtime/assets/{assetId}:
+    get:
+      tags: [Runtime]
+      operationId: getRuntimeAsset
+      summary: Get a signed URL for an asset
+      description: |
+        Called by the package JavaScript. In order: the partner must exist, be
+        active and the request `Origin` must be one of its `allowedOrigins`
+        (otherwise 403, and the origin is counted as rejected); rate limits
+        apply per partner and learner and per IP (429); the learner is counted
+        as active for the month; then the asset is resolved and a URL signed
+        for a short time (`expiresAt`) is returned. Going over the partner's
+        `seatCap` never blocks the learner; it only triggers a single alert
+        e-mail per month. No authentication: access is decided by partner id and
+        origin. CORS headers are returned only for allowed origins.
+      security: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          description: Opaque asset identifier returned when the asset was registered.
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{16,64}$'
+            example: Zk3p9QwL7xYb2NcVd8TfRa
+        - name: partner
+          in: query
+          required: true
+          description: Partner id baked into the package.
+          schema:
+            $ref: "#/components/schemas/PartnerId"
+        - name: learner
+          in: query
+          required: true
+          description: Learner id provided by the LMS. Never a name.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+            example: student-10432
+      responses:
+        "200":
+          description: A signed URL.
+          headers:
+            Access-Control-Allow-Origin:
+              description: The request origin, echoed back when it is allowed.
+              schema:
+                type: string
+                example: https://lms.northwind.example
+            Vary:
+              description: Always `Origin`.
+              schema:
+                type: string
+                example: Origin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeAsset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /healthz:
+    get:
+      tags: [Operations]
+      operationId: getHealthz
+      summary: Liveness probe
+      description: Returns 200 while the process is running. Does not touch the database.
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                status: ok
+  /readyz:
+    get:
+      tags: [Operations]
+      operationId: getReadyz
+      summary: Readiness probe
+      description: Returns 200 when the database is reachable, 503 otherwise.
+      security: []
+      responses:
+        "200":
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                status: ok
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /openapi.yaml:
+    get:
+      tags: [Operations]
+      operationId: getOpenAPI
+      summary: This specification
+      description: Returns this OpenAPI document.
+      security: []
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+                description: OpenAPI 3.0 document in YAML.
+  /llms.txt:
+    get:
+      tags: [Operations]
+      operationId: getLlmsTxt
+      summary: Description for language models
+      description: Plain-text summary of the service and links to its documentation.
+      security: []
+      responses:
+        "200":
+          description: The llms.txt document.
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Markdown-flavoured plain text, as described by llmstxt.org.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: The deployment admin key (`ADMIN_API_KEY`).
+
+  parameters:
+    PartnerId:
+      name: partnerId
+      in: path
+      required: true
+      description: Partner identifier.
+      schema:
+        $ref: "#/components/schemas/PartnerId"
+    AssetKey:
+      name: assetKey
+      in: path
+      required: true
+      description: Stable, human-chosen key of the asset, used by courses to reference it.
+      schema:
+        $ref: "#/components/schemas/AssetKey"
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Number of items to skip.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  responses:
+    BadRequest:
+      description: The request is malformed (bad JSON, bad parameter format).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Bad Request
+            status: 400
+            detail: Request body is not valid JSON.
+    Unauthorized:
+      description: The bearer token is missing or wrong.
+      headers:
+        WWW-Authenticate:
+          description: Authentication scheme.
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Unauthorized
+            status: 401
+            detail: A valid admin key is required.
+    Forbidden:
+      description: The partner is unknown or inactive, or the request origin is not allowed.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Forbidden
+            status: 403
+            detail: Origin not allowed for this partner.
+    NotFound:
+      description: The resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Not Found
+            status: 404
+            detail: Partner "northwind" does not exist.
+    Conflict:
+      description: The request conflicts with the current state of the resource.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Conflict
+            status: 409
+            detail: The resource was changed by another request.
+    NotAcceptable:
+      description: The `Accept` header asks for a representation this endpoint cannot produce.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Not Acceptable
+            status: 406
+            detail: Use application/json or text/csv.
+    PayloadTooLarge:
+      description: The request body is larger than `MAX_PACKAGE_BYTES` (10 MiB by default).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Request Entity Too Large
+            status: 413
+            detail: The request body is too large.
+    Unprocessable:
+      description: |
+        The body is valid JSON but fails validation. `errors` lists every
+        problem with the path of the offending field.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Unprocessable Content
+            status: 422
+            detail: The course has 2 problems.
+            errors:
+              - path: course.modules[0].lessons[1].assetKey
+                message: asset "vid-walkthrough" is not registered
+              - path: course.modules[0].lessons[3].quiz.passingScore
+                message: must be between 0 and 100
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            minimum: 0
+            example: 2
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Too Many Requests
+            status: 429
+            detail: Rate limit exceeded.
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Internal Server Error
+            status: 500
+            detail: Unexpected error.
+    ServiceUnavailable:
+      description: A dependency (the database) is not reachable.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: about:blank
+            title: Service Unavailable
+            status: 503
+            detail: Database is not reachable.
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [type, title, status]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          description: URI reference identifying the problem type; `about:blank` when generic.
+          example: about:blank
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+          example: Unprocessable Content
+        status:
+          type: integer
+          description: HTTP status code.
+          minimum: 400
+          maximum: 599
+          example: 422
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+          example: The course has 1 problem.
+        instance:
+          type: string
+          description: URI reference identifying this occurrence.
+          example: /v1/packages
+        errors:
+          type: array
+          description: Validation problems, one per offending field (422 only).
+          items:
+            $ref: "#/components/schemas/FieldError"
+
+    FieldError:
+      type: object
+      description: One validation problem.
+      required: [path, message]
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+          description: Path of the offending field in the request body.
+          example: course.modules[0].lessons[1].assetKey
+        message:
+          type: string
+          description: What is wrong with it.
+          example: asset "vid-walkthrough" is not registered
+
+    Health:
+      type: object
+      description: Health status.
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          description: Always `ok` in a 200 response.
+          enum: [ok]
+
+    PartnerId:
+      type: string
+      description: Partner identifier, chosen by the administrator.
+      pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$'
+      minLength: 1
+      maxLength: 128
+      example: northwind
+
+    AssetKey:
+      type: string
+      description: Stable key of an asset, referenced by course lessons.
+      pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$'
+      minLength: 1
+      maxLength: 128
+      example: vid-walkthrough
+
+    Origin:
+      type: string
+      description: |
+        A web origin: scheme, host and optional port, no path and no trailing
+        slash.
+      pattern: '^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$'
+      maxLength: 253
+      example: https://lms.northwind.example
+
+    PartnerInput:
+      type: object
+      description: Writable fields of a partner. A PUT replaces all of them.
+      required: [name, contactEmail, seatCap, allowedOrigins, active]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: Display name.
+          minLength: 1
+          maxLength: 200
+          example: Northwind Academy
+        contactEmail:
+          type: string
+          format: email
+          description: Address that receives the seat-cap alert.
+          maxLength: 254
+          example: learning@northwind.example
+        seatCap:
+          type: integer
+          description: Active learners per month included in the agreement. Going over it sends one alert and never blocks anyone.
+          minimum: 0
+          maximum: 10000000
+          example: 500
+        allowedOrigins:
+          type: array
+          description: Origins whose pages may call the runtime API. Compared exactly.
+          maxItems: 50
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Origin"
+        active:
+          type: boolean
+          description: Inactive partners are rejected by the runtime API.
+          example: true
+
+    Partner:
+      type: object
+      description: A partner as stored.
+      required: [partnerId, name, contactEmail, seatCap, allowedOrigins, active, createdAt, updatedAt]
+      additionalProperties: false
+      properties:
+        partnerId:
+          $ref: "#/components/schemas/PartnerId"
+        name:
+          type: string
+          description: Display name.
+          minLength: 1
+          maxLength: 200
+          example: Northwind Academy
+        contactEmail:
+          type: string
+          format: email
+          description: Address that receives the seat-cap alert.
+          maxLength: 254
+          example: learning@northwind.example
+        seatCap:
+          type: integer
+          description: Active learners per month included in the agreement. Going over it sends one alert and never blocks anyone.
+          minimum: 0
+          maximum: 10000000
+          example: 500
+        allowedOrigins:
+          type: array
+          description: Origins whose pages may call the runtime API. Compared exactly.
+          maxItems: 50
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Origin"
+        active:
+          type: boolean
+          description: Inactive partners are rejected by the runtime API.
+          example: true
+        createdAt:
+          type: string
+          format: date-time
+          description: When the partner was created.
+          example: "2026-11-01T09:30:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the partner was last changed.
+          example: "2026-11-01T09:30:00Z"
+
+    PartnerList:
+      type: object
+      description: A page of partners.
+      required: [items, total]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: Partners in this page.
+          items:
+            $ref: "#/components/schemas/Partner"
+        total:
+          type: integer
+          description: Total number of partners.
+          minimum: 0
+          example: 1
+
+    AssetKind:
+      type: string
+      description: |
+        How the player uses the asset: `video` is shown in an iframe, `file` is
+        downloaded and shown as a blob.
+      enum: [video, file]
+
+    AssetInput:
+      type: object
+      description: Writable fields of an asset.
+      required: [kind, uri]
+      additionalProperties: false
+      properties:
+        kind:
+          $ref: "#/components/schemas/AssetKind"
+        uri:
+          type: string
+          description: |
+            Location of the media. `stream-bunny://<videoGuid>`,
+            `s3://<bucket>/<key>`, `bunny-s3://<bucket>/<key>` or `bunny-storage://<path>`.
+          pattern: '^(stream-bunny|s3|bunny-s3|bunny-storage)://[^\s]+$'
+          maxLength: 1024
+          example: s3://course-files/guides/getting-started.pdf
+
+    Asset:
+      type: object
+      description: An asset as stored.
+      required: [assetKey, assetId, kind, uri, createdAt, updatedAt]
+      additionalProperties: false
+      properties:
+        assetKey:
+          $ref: "#/components/schemas/AssetKey"
+        assetId:
+          type: string
+          description: Opaque random identifier, stable for the life of the asset. This is what packages call the runtime API with.
+          pattern: '^[A-Za-z0-9_-]{16,64}$'
+          example: Zk3p9QwL7xYb2NcVd8TfRa
+        kind:
+          $ref: "#/components/schemas/AssetKind"
+        uri:
+          type: string
+          description: |
+            Location of the media. `stream-bunny://<videoGuid>`,
+            `s3://<bucket>/<key>`, `bunny-s3://<bucket>/<key>` or `bunny-storage://<path>`.
+          pattern: '^(stream-bunny|s3|bunny-s3|bunny-storage)://[^\s]+$'
+          maxLength: 1024
+          example: s3://course-files/guides/getting-started.pdf
+        createdAt:
+          type: string
+          format: date-time
+          description: When the asset was registered.
+          example: "2026-11-01T09:30:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the asset was last changed.
+          example: "2026-11-01T09:30:00Z"
+
+    ScormVersion:
+      type: string
+      description: Target SCORM edition.
+      enum: ["1.2", "2004"]
+      example: "2004"
+
+    PackageRequest:
+      type: object
+      description: Request to build a package.
+      required: [partnerId, scormVersion, course]
+      additionalProperties: false
+      properties:
+        partnerId:
+          $ref: "#/components/schemas/PartnerId"
+        scormVersion:
+          $ref: "#/components/schemas/ScormVersion"
+        course:
+          $ref: "#/components/schemas/Course"
+
+    Identifier:
+      type: string
+      description: Identifier unique within its parent.
+      pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'
+      minLength: 1
+      maxLength: 64
+      example: l1
+
+    Course:
+      type: object
+      description: A course in the neutral format. No SCORM or LMS concepts.
+      required: [id, title, version, language, modules]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        title:
+          type: string
+          description: Course title.
+          minLength: 1
+          maxLength: 300
+          example: Introduction to workplace safety
+        version:
+          type: string
+          description: Content version; changing it makes LMSs treat the package as a new revision.
+          minLength: 1
+          maxLength: 32
+          example: "3"
+        language:
+          type: string
+          description: BCP 47 language tag.
+          pattern: '^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$'
+          maxLength: 35
+          example: en
+        modules:
+          type: array
+          description: Modules in presentation order.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Module"
+
+    Module:
+      type: object
+      description: A group of lessons.
+      required: [title, lessons]
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          description: Module title.
+          minLength: 1
+          maxLength: 300
+          example: Getting started
+        lessons:
+          type: array
+          description: Lessons in presentation order.
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/Lesson"
+
+    Lesson:
+      description: A lesson; the `type` field selects its shape.
+      oneOf:
+        - $ref: "#/components/schemas/TextLesson"
+        - $ref: "#/components/schemas/VideoLesson"
+        - $ref: "#/components/schemas/FileLesson"
+        - $ref: "#/components/schemas/QuizLesson"
+      discriminator:
+        propertyName: type
+        mapping:
+          text: "#/components/schemas/TextLesson"
+          video: "#/components/schemas/VideoLesson"
+          file: "#/components/schemas/FileLesson"
+          quiz: "#/components/schemas/QuizLesson"
+
+    TextLesson:
+      type: object
+      description: Rich text. The HTML is sanitised before it enters the package.
+      required: [id, title, type, html]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        title:
+          type: string
+          description: Lesson title.
+          minLength: 1
+          maxLength: 300
+          example: Welcome
+        type:
+          type: string
+          description: Lesson type.
+          enum: [text]
+        html:
+          type: string
+          description: Lesson body as HTML.
+          minLength: 1
+          maxLength: 200000
+          example: "<p>Welcome to the course.</p>"
+
+    VideoLesson:
+      type: object
+      description: A video served by signed URL.
+      required: [id, title, type, assetKey]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        title:
+          type: string
+          description: Lesson title.
+          minLength: 1
+          maxLength: 300
+          example: Safety walkthrough
+        type:
+          type: string
+          description: Lesson type.
+          enum: [video]
+        assetKey:
+          $ref: "#/components/schemas/AssetKey"
+
+    FileLesson:
+      type: object
+      description: A downloadable file served by signed URL.
+      required: [id, title, type, assetKey, fileName]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        title:
+          type: string
+          description: Lesson title.
+          minLength: 1
+          maxLength: 300
+          example: Checklist
+        type:
+          type: string
+          description: Lesson type.
+          enum: [file]
+        assetKey:
+          $ref: "#/components/schemas/AssetKey"
+        fileName:
+          type: string
+          description: Name offered to the learner when saving the file.
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^/\\]+$'
+          example: checklist.pdf
+
+    QuizLesson:
+      type: object
+      description: A quiz lesson. A quiz marked as final decides course completion.
+      required: [id, title, type, quiz]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        title:
+          type: string
+          description: Lesson title.
+          minLength: 1
+          maxLength: 300
+          example: Final exam
+        type:
+          type: string
+          description: Lesson type.
+          enum: [quiz]
+        quiz:
+          $ref: "#/components/schemas/Quiz"
+
+    Quiz:
+      type: object
+      description: Quiz definition.
+      required: [final, passingScore, questions]
+      additionalProperties: false
+      properties:
+        final:
+          type: boolean
+          description: When true, passing this quiz completes the course; at most one per course.
+          example: true
+        passingScore:
+          type: integer
+          description: Minimum percentage of correct answers to pass.
+          minimum: 0
+          maximum: 100
+          example: 70
+        questions:
+          type: array
+          description: Questions in presentation order.
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/Question"
+
+    Question:
+      type: object
+      description: A question. `single` has exactly one correct option, `multiple` one or more.
+      required: [id, type, promptHtml, options, correct]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        type:
+          type: string
+          description: Whether one or several options are correct.
+          enum: [single, multiple]
+        promptHtml:
+          type: string
+          description: The question as HTML (sanitised).
+          minLength: 1
+          maxLength: 20000
+          example: "<p>Where is the assembly point?</p>"
+        options:
+          type: array
+          description: Answer options.
+          minItems: 2
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/Option"
+        correct:
+          type: array
+          description: Ids of the correct options. Each must exist in `options`.
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier"
+
+    Option:
+      type: object
+      description: One answer option.
+      required: [id, html]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        html:
+          type: string
+          description: Option text as HTML (sanitised).
+          minLength: 1
+          maxLength: 5000
+          example: Car park
+
+    RuntimeAsset:
+      type: object
+      description: A short-lived signed URL.
+      required: [kind, url, expiresAt]
+      additionalProperties: false
+      properties:
+        kind:
+          $ref: "#/components/schemas/AssetKind"
+        url:
+          type: string
+          format: uri
+          description: Signed URL. Put it in an iframe for `video`, fetch it for `file`.
+          example: https://media.example.com/embed/6f1c2a9e?token=0a1b2c&expires=1793527200
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the URL stops working.
+          example: "2026-11-01T10:05:00Z"
+
+    UsageReport:
+      type: object
+      description: Usage of one month.
+      required: [month, partners]
+      additionalProperties: false
+      properties:
+        month:
+          type: string
+          description: Calendar month, `YYYY-MM`.
+          pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$'
+          example: "2026-11"
+        partners:
+          type: array
+          description: One entry per partner, ordered by `partnerId`.
+          items:
+            $ref: "#/components/schemas/PartnerUsage"
+
+    PartnerUsage:
+      type: object
+      description: Usage of one partner in the month.
+      required: [partnerId, name, seatCap, activeLearners, rejectedOrigins]
+      additionalProperties: false
+      properties:
+        partnerId:
+          $ref: "#/components/schemas/PartnerId"
+        name:
+          type: string
+          description: Partner display name.
+          example: Northwind Academy
+        seatCap:
+          type: integer
+          description: Active learners per month included in the agreement.
+          minimum: 0
+          example: 500
+        activeLearners:
+          type: integer
+          description: Distinct learners that requested at least one asset.
+          minimum: 0
+          example: 312
+        rejectedOrigins:
+          type: array
+          description: Origins that were rejected, with how many times.
+          items:
+            $ref: "#/components/schemas/RejectedOrigin"
+
+    RejectedOrigin:
+      type: object
+      description: An origin refused by the runtime API.
+      required: [origin, count]
+      additionalProperties: false
+      properties:
+        origin:
+          type: string
+          description: The `Origin` header as received (may not be a valid origin).
+          maxLength: 253
+          example: https://unknown.example
+        count:
+          type: integer
+          description: Number of rejected requests.
+          minimum: 1
+          example: 4

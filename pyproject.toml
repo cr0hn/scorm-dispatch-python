@@ -1,0 +1,48 @@
+[project]
+name = "scorm-dispatch-client"
+version = "0.1.0"
+description = "Async Python client for the scorm-dispatch API"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx2>=2.13",
+    "pydantic>=2.10",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.15",
+    "mypy>=2",
+    "openapi-core>=0.19",
+    "pyyaml>=6",
+    "types-pyyaml",
+    "testcontainers>=4.9",
+    "pytest-cov>=6",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+markers = ["integration: builds the Go binary and needs Docker (make python-sdk-check)"]
+
+[tool.uv.build-backend]
+module-name = "scorm_dispatch"
+
+[tool.coverage.run]
+source = ["scorm_dispatch"]
+branch = true

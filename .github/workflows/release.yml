@@ -1,0 +1,22 @@
+# Publishes to PyPI with Trusted Publishing when a v* tag is pushed.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Tag matches version
+        run: test "${GITHUB_REF_NAME#v}" = "$(uv version --short)"
+      - run: make lint typecheck
+      - run: uv run pytest tests/test_unit.py tests/test_contract.py -q --cov --cov-branch --cov-fail-under=100
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

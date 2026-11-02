@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Async Python client for the scorm-dispatch API"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "Daniel Alfocea", email = "me@danielalfocea.com" }]
 keywords = ["scorm", "scorm-dispatch", "lms", "elearning", "httpx", "asyncio", "client"]

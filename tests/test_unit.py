@@ -170,3 +170,61 @@ async def test_owned_client_is_closed() -> None:
     async with Client(BASE, "k") as c:
         inner = c._http
     assert inner.is_closed
+
+
+async def test_list_partners_defaults() -> None:
+    c, seen = make(lambda _: js({"items": [], "total": 0}))
+    await c.list_partners()
+    assert dict(seen[0].url.params) == {"limit": "50", "offset": "0"}
+
+
+async def test_timeout_reaches_every_request() -> None:
+    seen: list[httpx2.Request] = []
+
+    def record(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return js({"status": "ok"})
+
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(record))
+    await Client(BASE, "k", http_client=http, timeout=7.0).healthz()
+    assert seen[0].extensions["timeout"] == {"connect": 7.0, "read": 7.0, "write": 7.0, "pool": 7.0}
+    await http.aclose()
+
+
+async def test_owned_client_gets_the_timeout_and_default_is_30() -> None:
+    async with Client(BASE, "k") as c:
+        assert c._http.timeout == httpx2.Timeout(30.0) and c._timeout == 30.0
+    async with Client(BASE, "k", timeout=9.0) as c:
+        assert c._http.timeout == httpx2.Timeout(9.0) and c._timeout == 9.0
+
+
+async def test_base_url_trailing_slash_is_stripped() -> None:
+    seen: list[httpx2.Request] = []
+
+    def record(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return js({"status": "ok"})
+
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(record))
+    await Client("https://sdX//", "k", http_client=http).healthz()
+    assert str(seen[0].url) == "https://sdx/healthz"
+    await http.aclose()
+
+
+async def test_non_problem_detail_is_cut_at_500() -> None:
+    c, _ = make(lambda _: httpx2.Response(502, text="x" * 600))
+    with pytest.raises(ScormDispatchError) as e:
+        await c.healthz()
+    assert e.value.problem.detail == "x" * 500
+
+
+async def test_error_message() -> None:
+    body = {"type": "about:blank", "title": "FIX", "status": 404}
+    c, _ = make(lambda _: js(body, 404))
+    with pytest.raises(ScormDispatchError) as e:
+        await c.get_partner("x")
+    assert str(e.value) == "404 FIX"
+    body["detail"] = "gone"
+    with pytest.raises(ScormDispatchError) as e:
+        await c.get_partner("x")
+    assert str(e.value) == "404 FIX: gone"

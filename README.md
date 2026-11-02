@@ -25,24 +25,53 @@ pip install "scorm-dispatch-client @ git+https://github.com/cr0hn/scorm-dispatch
 import asyncio
 from scorm_dispatch import Client
 
+
 async def main() -> None:
     async with Client("https://scorm.example.com", "ADMIN_API_KEY") as sd:
-        await sd.put_partner("northwind", {
-            "name": "Northwind Academy",
-            "contactEmail": "learning@northwind.example",
-            "seatCap": 500,
-            "allowedOrigins": ["https://lms.northwind.example"],
-            "active": True,
-        })
-        await sd.put_asset("vid-walkthrough", {"kind": "video", "uri": "stream-bunny://6f1c2a9e-..."})
-        zip_bytes = await sd.create_package("northwind", "2004", {
-            "id": "intro", "title": "Intro", "version": "1", "language": "en",
-            "modules": [{"title": "Start", "lessons": [
-                {"id": "l1", "title": "Welcome", "type": "text", "html": "<p>Hello</p>"},
-                {"id": "l2", "title": "Video", "type": "video", "assetKey": "vid-walkthrough"},
-            ]}],
-        })
+        await sd.put_partner(
+            "northwind",
+            {
+                "name": "Northwind Academy",
+                "contactEmail": "learning@northwind.example",
+                "seatCap": 500,
+                "allowedOrigins": ["https://lms.northwind.example"],
+                "active": True,
+            },
+        )
+        await sd.put_asset(
+            "vid-walkthrough", {"kind": "video", "uri": "stream-bunny://6f1c2a9e-..."}
+        )
+        zip_bytes = await sd.create_package(
+            "northwind",
+            "2004",
+            {
+                "id": "intro",
+                "title": "Intro",
+                "version": "1",
+                "language": "en",
+                "modules": [
+                    {
+                        "title": "Start",
+                        "lessons": [
+                            {
+                                "id": "l1",
+                                "title": "Welcome",
+                                "type": "text",
+                                "html": "<p>Hello</p>",
+                            },
+                            {
+                                "id": "l2",
+                                "title": "Video",
+                                "type": "video",
+                                "assetKey": "vid-walkthrough",
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
         open("intro.zip", "wb").write(zip_bytes)
+
 
 asyncio.run(main())
 ```
@@ -71,13 +100,15 @@ page = await sd.list_partners(limit=100)
 for p in page.items:
     print(p.partner_id, p.seat_cap, p.active)
 
-report = await sd.get_usage_report("2026-11")          # month is YYYY-MM
+report = await sd.get_usage_report("2026-11")  # month is YYYY-MM
 csv_text = await sd.get_usage_report_csv("2026-11")
 
 # What a package does in the browser; useful to check a partner's setup.
 # It sends the Origin you pass and never the admin key.
 asset = await sd.get_runtime_asset(
-    "Zk3p9QwL7xYb2NcVd8TfRa", partner="northwind", learner="student-1",
+    "Zk3p9QwL7xYb2NcVd8TfRa",
+    partner="northwind",
+    learner="student-1",
     origin="https://lms.northwind.example",
 )
 print(asset.kind, asset.url, asset.expires_at)
@@ -93,10 +124,10 @@ from scorm_dispatch import ScormDispatchError
 try:
     await sd.create_package("northwind", "2004", course)
 except ScormDispatchError as e:
-    e.status        # int: 400, 401, 403, 404, 409, 413, 422, 429, 5xx
-    e.problem       # Problem: type, title, status, detail, errors
+    e.status  # int: 400, 401, 403, 404, 409, 413, 422, 429, 5xx
+    e.problem  # Problem: type, title, status, detail, errors
     e.field_errors  # 422 only: [FieldError(path="course.modules[0]...", message="...")]
-    e.retry_after   # 429 only: seconds, from Retry-After
+    e.retry_after  # 429 only: seconds, from Retry-After
 ```
 
 | Status | Meaning |

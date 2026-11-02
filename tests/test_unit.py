@@ -1,12 +1,16 @@
 """Exact requests the client builds and how it maps answers, against a MockTransport."""
 
+import copy
+import email.utils
 import json
+import pickle
+import time
 from collections.abc import Callable
 
 import httpx2
 import pytest
 
-from scorm_dispatch import Client, ScormDispatchError
+from scorm_dispatch import Client, Problem, ScormDispatchError
 from tests.samples import (
     ASSET_OUT,
     COURSE,
@@ -193,7 +197,7 @@ async def test_timeout_reaches_every_request() -> None:
 
 async def test_owned_client_gets_the_timeout_and_default_is_30() -> None:
     async with Client(BASE, "k") as c:
-        assert c._http.timeout == httpx2.Timeout(30.0) and c._timeout == 30.0
+        assert c._http.timeout == httpx2.Timeout(30.0) and c._timeout is None
     async with Client(BASE, "k", timeout=9.0) as c:
         assert c._http.timeout == httpx2.Timeout(9.0) and c._timeout == 9.0
 
@@ -228,3 +232,126 @@ async def test_error_message() -> None:
     with pytest.raises(ScormDispatchError) as e:
         await c.get_partner("x")
     assert str(e.value) == "404 FIX: gone"
+
+
+async def test_injected_client_keeps_its_own_timeout() -> None:
+    seen: list[httpx2.Request] = []
+
+    def record(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return js({"status": "ok"})
+
+    http = httpx2.AsyncClient(timeout=3.0, transport=httpx2.MockTransport(record))
+    await Client(BASE, "k", http_client=http).healthz()
+    assert seen[0].extensions["timeout"] == {"connect": 3.0, "read": 3.0, "write": 3.0, "pool": 3.0}
+    await http.aclose()
+
+
+async def test_unknown_enum_value_in_a_response_is_accepted() -> None:
+    c, _ = make(lambda _: js({**ASSET_OUT, "kind": "audio"}))
+    assert (await c.get_asset("a")).kind == "audio"
+    c, _ = make(lambda _: js({**RUNTIME_OUT, "kind": "audio"}))
+    assert (await c.get_runtime_asset("i", partner="p", learner="l", origin="o")).kind == "audio"
+
+
+async def test_unparseable_success_body_is_a_scorm_dispatch_error() -> None:
+    for body in (b'{"unexpected": 1}', b"not json"):
+        c, _ = make(lambda _, body=body: httpx2.Response(200, content=body))
+        with pytest.raises(ScormDispatchError) as e:
+            await c.get_partner("x")
+        assert e.value.status == 200 and e.value.problem.title == "Unparseable response body"
+        assert e.value.problem.detail
+
+
+def test_error_pickles_and_copies() -> None:
+    err = ScormDispatchError(429, Problem(title="Slow", status=429, detail="wait"), 7)
+    for clone in (pickle.loads(pickle.dumps(err)), copy.copy(err), copy.deepcopy(err)):
+        assert (clone.status, clone.problem, clone.retry_after) == (429, err.problem, 7)
+        assert str(clone) == str(err) == "429 Slow: wait"
+
+
+def test_error_message_keeps_trailing_characters_of_the_title() -> None:
+    err = ScormDispatchError(400, Problem(title="What?: ", status=400))
+    assert str(err) == "400 What?: "
+
+
+async def _retry_after(value: str) -> int | None:
+    c, _ = make(lambda _: js({"title": "T", "status": 429}, 429, {"Retry-After": value}))
+    with pytest.raises(ScormDispatchError) as e:
+        await c.healthz()
+    return e.value.retry_after
+
+
+async def test_retry_after_seconds() -> None:
+    assert await _retry_after("7") == 7
+
+
+async def test_retry_after_http_date() -> None:
+    future = email.utils.formatdate(time.time() + 120, usegmt=True)
+    assert 117 <= (await _retry_after(future) or -1) <= 120
+    assert await _retry_after(email.utils.formatdate(time.time() - 3600, usegmt=True)) == 0
+    assert (await _retry_after("Wed, 21 Oct 2099 07:28:00 -0000") or 0) > 0  # no zone: UTC
+
+
+@pytest.mark.parametrize("value", ["soon", "", "-5", "1.5", "Wed, 99 Foo 2099 99:99:99"])
+async def test_retry_after_garbage_is_none(value: str) -> None:
+    assert await _retry_after(value) is None
+
+
+async def test_redirect_is_an_error_and_never_followed() -> None:
+    def handler(r: httpx2.Request) -> httpx2.Response:
+        if r.url.host == "sd.test":
+            return httpx2.Response(302, headers={"Location": "https://evil.test/steal"})
+        raise AssertionError("the redirect was followed")  # pragma: no cover
+
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler), follow_redirects=True)
+    with pytest.raises(ScormDispatchError) as e:
+        await Client(BASE, "k3y", http_client=http).get_partner("x")
+    assert e.value.status == 302
+    assert "https://evil.test/steal" in str(e.value) and "never follows" in str(e.value)
+    await http.aclose()
+
+
+async def test_redirect_without_location() -> None:
+    c, _ = make(lambda _: httpx2.Response(304))
+    with pytest.raises(ScormDispatchError) as e:
+        await c.healthz()
+    assert e.value.status == 304 and "no Location" in str(e.value)
+
+
+async def test_csv_is_decoded_as_utf8() -> None:
+    text = "partner_id,name\nacme,Caf\u00e9 \u65e5\u672c\n"
+    for ctype in ("text/csv", "text/csv; charset=iso-8859-1"):
+        c, _ = make(
+            lambda _, ctype=ctype: httpx2.Response(
+                200, content=text.encode(), headers={"Content-Type": ctype}
+            )
+        )
+        assert await c.get_usage_report_csv("2026-11") == text
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        (b'{"error": "boom"}', '{"error": "boom"}'),
+        (b'["a", 1]', '["a", 1]'),
+        (b"", None),
+    ],
+)
+async def test_odd_error_bodies(body: bytes, detail: str | None) -> None:
+    c, _ = make(
+        lambda _: httpx2.Response(500, content=body, headers={"Content-Type": "application/json"})
+    )
+    with pytest.raises(ScormDispatchError) as e:
+        await c.get_partner("x")
+    assert e.value.status == 500 and e.value.problem.title == "Internal Server Error"
+    assert e.value.problem.detail == detail
+
+
+async def test_413_with_html_body() -> None:
+    html = "<html><body>413 Request Entity Too Large</body></html>"
+    c, _ = make(lambda _: httpx2.Response(413, text=html, headers={"Content-Type": "text/html"}))
+    with pytest.raises(ScormDispatchError) as e:
+        await c.create_package("p", "2004", COURSE)
+    assert e.value.status == 413 and e.value.problem.detail == html
+    assert e.value.problem.title == "Content Too Large"

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from types import TracebackType
-from typing import Self
+from typing import Self, TypeVar
 from urllib.parse import quote
 
 import httpx2
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from scorm_dispatch.errors import ScormDispatchError
 from scorm_dispatch.models import (
@@ -32,7 +34,9 @@ class Client:
     """Async client of one scorm-dispatch deployment.
 
     Pass `http_client` to share a connection pool (you then close it yourself); otherwise the
-    client owns one and `aclose()` / `async with` closes it.
+    client owns one and `aclose()` / `async with` closes it. `timeout` (seconds) defaults to 30
+    for an owned client and to the injected client's own timeout; set it to override either.
+    Redirects are never followed, so the admin key cannot leave `base_url`.
     """
 
     def __init__(
@@ -41,12 +45,12 @@ class Client:
         admin_key: str,
         *,
         http_client: httpx2.AsyncClient | None = None,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._admin_key = admin_key
         self._owns_http = http_client is None
-        self._http = http_client or httpx2.AsyncClient(timeout=timeout)
+        self._http = http_client or httpx2.AsyncClient(timeout=30.0 if timeout is None else timeout)
         self._timeout = timeout
 
     async def __aenter__(self) -> Self:
@@ -86,7 +90,8 @@ class Client:
             params=params,
             headers=h,
             json=json,
-            timeout=self._timeout,
+            timeout=httpx2.USE_CLIENT_DEFAULT if self._timeout is None else self._timeout,
+            follow_redirects=False,
         )
         if response.is_success:
             return response
@@ -97,29 +102,29 @@ class Client:
     async def put_partner(self, partner_id: str, partner: PartnerInput) -> Partner:
         """Idempotent upsert; replaces every field."""
         r = await self._send("PUT", f"/v1/partners/{_seg(partner_id)}", json=partner)
-        return Partner.model_validate_json(r.content)
+        return _parse(Partner, r)
 
     async def get_partner(self, partner_id: str) -> Partner:
         """Fetch one partner (404 if missing)."""
         r = await self._send("GET", f"/v1/partners/{_seg(partner_id)}")
-        return Partner.model_validate_json(r.content)
+        return _parse(Partner, r)
 
     async def list_partners(self, *, limit: int = 50, offset: int = 0) -> PartnerList:
         """One page of partners ordered by id; `limit` 1-200."""
         r = await self._send("GET", "/v1/partners", params={"limit": limit, "offset": offset})
-        return PartnerList.model_validate_json(r.content)
+        return _parse(PartnerList, r)
 
     # --- assets -----------------------------------------------------------------------------
 
     async def put_asset(self, asset_key: str, asset: AssetInput) -> Asset:
         """Idempotent upsert; `assetId` never changes once created."""
         r = await self._send("PUT", f"/v1/assets/{_seg(asset_key)}", json=asset)
-        return Asset.model_validate_json(r.content)
+        return _parse(Asset, r)
 
     async def get_asset(self, asset_key: str) -> Asset:
         """Fetch one asset (404 if missing)."""
         r = await self._send("GET", f"/v1/assets/{_seg(asset_key)}")
-        return Asset.model_validate_json(r.content)
+        return _parse(Asset, r)
 
     # --- packages and reports ---------------------------------------------------------------
 
@@ -138,14 +143,14 @@ class Client:
     async def get_usage_report(self, month: str) -> UsageReport:
         """Active learners per partner for `month` (`YYYY-MM`)."""
         r = await self._send("GET", "/v1/reports/usage", params={"month": month})
-        return UsageReport.model_validate_json(r.content)
+        return _parse(UsageReport, r)
 
     async def get_usage_report_csv(self, month: str) -> str:
         """Same report as `get_usage_report`, as RFC 4180 CSV text."""
         r = await self._send(
             "GET", "/v1/reports/usage", params={"month": month}, headers={"Accept": "text/csv"}
         )
-        return r.text
+        return r.content.decode("utf-8")
 
     # --- runtime and operations -------------------------------------------------------------
 
@@ -160,7 +165,7 @@ class Client:
             params={"partner": partner, "learner": learner},
             headers={"Origin": origin},
         )
-        return RuntimeAsset.model_validate_json(r.content)
+        return _parse(RuntimeAsset, r)
 
     async def healthz(self) -> None:
         """Process alive. Raises `ScormDispatchError` otherwise."""
@@ -171,16 +176,55 @@ class Client:
         await self._send("GET", "/readyz", admin=False)
 
 
+_M = TypeVar("_M", bound=BaseModel)
+
+
+def _parse(model: type[_M], response: httpx2.Response) -> _M:
+    try:
+        return model.model_validate_json(response.content)
+    except ValidationError as exc:
+        problem = Problem(
+            title="Unparseable response body",
+            status=response.status_code,
+            detail=f"{model.__name__}: {exc.error_count()} validation error(s)",
+        )
+        raise ScormDispatchError(response.status_code, problem) from exc
+
+
+def _retry_after(value: str | None) -> int | None:
+    """Seconds from a `Retry-After` header, in its delta-seconds or HTTP-date form."""
+    if not value:
+        return None
+    if value.isascii() and value.isdigit():
+        return int(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:  # "-0000" means UTC with unknown local zone
+        when = when.replace(tzinfo=UTC)
+    return max(0, int((when - datetime.now(UTC)).total_seconds()))
+
+
 def _error(response: httpx2.Response) -> ScormDispatchError:
+    if 300 <= response.status_code < 400:
+        target = response.headers.get("Location")
+        where = f"to {target}" if target else "(no Location header)"
+        problem = Problem(
+            title="Unexpected redirect",
+            status=response.status_code,
+            detail=f"The server answered with a redirect {where}. The SDK never follows "
+            "redirects, so the admin key stays on the configured host; fix base_url.",
+        )
+        return ScormDispatchError(response.status_code, problem)
     try:
         problem = Problem.model_validate_json(response.content)
-    except ValidationError:  # a proxy's HTML page, an empty body...
+    except ValidationError:  # a proxy's HTML page, an empty body, JSON that is no Problem...
         problem = Problem(
             title=response.reason_phrase,
             status=response.status_code,
             detail=response.text[:500] or None,
         )
-    retry = response.headers.get("Retry-After")
     return ScormDispatchError(
-        response.status_code, problem, int(retry) if retry and retry.isdigit() else None
+        response.status_code, problem, _retry_after(response.headers.get("Retry-After"))
     )

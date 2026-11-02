@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Self
+
 from scorm_dispatch.models import FieldError, Problem
 
 
@@ -15,7 +17,12 @@ class ScormDispatchError(Exception):
         self.status = status
         self.problem = problem
         self.retry_after = retry_after
-        super().__init__(f"{status} {problem.title}: {problem.detail or ''}".rstrip(": "))
+        message = f"{status} {problem.title}"
+        super().__init__(f"{message}: {problem.detail}" if problem.detail else message)
+
+    def __reduce__(self) -> tuple[type[Self], tuple[int, Problem, int | None]]:
+        # Exception.__reduce__ would replay the single formatted message as args: unpicklable.
+        return (type(self), (self.status, self.problem, self.retry_after))
 
     @property
     def field_errors(self) -> list[FieldError]:

@@ -1,6 +1,6 @@
 # scorm-dispatch-client
 
-> Async Python client (3.14+, httpx2, pydantic) for the scorm-dispatch API: build SCORM 1.2/2004 zips
+> Async Python client (3.11+, httpx2, pydantic) for the scorm-dispatch API: build SCORM 1.2/2004 zips
 > from a neutral JSON course, manage partners and assets, read usage reports, call the runtime endpoint.
 
 Install: `pip install scorm-dispatch-client`. Import: `from scorm_dispatch import Client, ScormDispatchError`.

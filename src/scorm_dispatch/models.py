@@ -160,7 +160,7 @@ class Asset(_Response):
 
     asset_key: str
     asset_id: str
-    kind: AssetKind
+    kind: str  # `AssetKind` today; a plain str so a new server kind does not break parsing
     uri: str
     created_at: datetime
     updated_at: datetime
@@ -169,7 +169,7 @@ class Asset(_Response):
 class RuntimeAsset(_Response):
     """Short-lived signed URL for an asset."""
 
-    kind: AssetKind
+    kind: str  # see `Asset.kind`
     url: str
     expires_at: datetime
 

@@ -6,7 +6,7 @@ Async Python client for scorm-dispatch, the service that
 builds lightweight SCORM packages from a neutral JSON course and, at run time, validates partners by id and
 `Origin` and hands out short-lived signed URLs.
 
-- Async only, on `httpx2`. Python 3.14+.
+- Async only, on `httpx2`. Python 3.11+.
 - Fully typed (`py.typed`, mypy strict). Requests are `TypedDict`s, responses are frozen pydantic models.
 - Covers the admin API, the public runtime endpoint and the health routes.
 - One exception, `ScormDispatchError`, carrying the HTTP status and the RFC 9457 problem body.
@@ -127,7 +127,7 @@ except ScormDispatchError as e:
     e.status  # int: 400, 401, 403, 404, 409, 413, 422, 429, 5xx
     e.problem  # Problem: type, title, status, detail, errors
     e.field_errors  # 422 only: [FieldError(path="course.modules[0]...", message="...")]
-    e.retry_after  # 429 only: seconds, from Retry-After
+    e.retry_after  # 429 only: seconds, from Retry-After (seconds or HTTP-date form)
 ```
 
 | Status | Meaning |
@@ -142,11 +142,18 @@ except ScormDispatchError as e:
 | 429 | rate limit; wait `retry_after` seconds |
 
 A non-problem body (for example a proxy's HTML page) still raises, with the text in `problem.detail`.
+A 2xx body that does not parse also raises `ScormDispatchError` (title `Unparseable response body`).
+Unknown enum values in responses (for example a new asset `kind`) are accepted as plain strings.
 Network failures are `httpx2` exceptions and are not wrapped.
+
+**Redirects are never followed**: a 3xx answer raises `ScormDispatchError` naming the redirect target, even if
+you pass an `http_client` with `follow_redirects=True`. This keeps the Bearer key on the configured host.
+Fix `base_url` instead.
 
 ## Timeouts and retries
 
-`timeout` (seconds, default 30) applies to every request. **The client never retries**: `PUT` upserts are
+`timeout` (seconds) applies to every request. If you omit it, an owned client uses 30 and an injected
+`http_client` keeps its own timeout; pass `timeout` explicitly to override it. **The client never retries**: `PUT` upserts are
 idempotent and safe for you to retry; `POST /v1/packages` is a pure function of its body, also safe.
 Back off on 429 using `retry_after`. To tune pooling or add transport-level retries, pass your own
 `httpx2.AsyncClient` as `http_client` (you then own and close it).
@@ -161,12 +168,22 @@ Unknown response fields are ignored, so a newer server does not break an older c
 
 The client follows semantic versioning. It is built and tested against the contract in
 [`spec/openapi.yaml`](spec/openapi.yaml) (API 1.x); a 1.x server is expected to work with any 0.x/1.x client.
-Contract tests validate every request and response against that file.
+
+What each suite checks:
+
+- **Unit** (`tests/test_unit.py`): the exact requests the client builds and how it maps answers and errors,
+  against an in-memory transport; 100% line and branch coverage is enforced.
+- **Contract** (`tests/test_contract.py`): the requests the client builds, and hand-written sample responses,
+  are validated against `spec/openapi.yaml`. The samples are written by hand, so this proves the client agrees
+  with the spec, not that the server does.
+- **Integration** (`tests/test_integration.py`): the real server (built from source, with Postgres behind
+  PgBouncer and MinIO) answers every public method and error status. This is what covers real responses.
 
 ## Development
 
 ```sh
-make check          # lint, mypy, unit (100% line+branch coverage), contract, integration
+make check          # lint, mypy, unit+contract on Python 3.11-3.14, integration
+make matrix         # only unit+contract on every supported Python (each in its own .venv-3.X)
 make integration    # needs Docker, Go, and the server source: SCORM_DISPATCH_SRC=../scorm-dispatch
 ```
 
@@ -176,7 +193,9 @@ if the server source is missing.
 
 ## Contributing
 
-Issues and pull requests welcome. Keep `make check` green; a change in behaviour needs a unit test and an
+Issues and pull requests welcome. CI (`.github/workflows/ci.yml`) runs lint, mypy and unit+contract on
+Python 3.11-3.14. It cannot run the integration suite, which needs the private server source: run
+`make integration` locally before sending a change. Keep `make check` green; a change in behaviour needs a unit test and an
 integration test. When the server API changes, copy its `api/openapi.yaml` to `spec/openapi.yaml`.
 
 ## Security

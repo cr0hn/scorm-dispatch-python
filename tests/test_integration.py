@@ -164,3 +164,20 @@ async def test_error_statuses(client: Client, server: Server) -> None:
             last = err
             break
     assert last is not None and last.status == 429 and last.retry_after is not None
+
+
+@pytest.mark.parametrize("bad", ["café", "a?b", "a#b", "a%b", "a%2Fb", "a/b", "a b", "-x"])
+async def test_server_rejects_invalid_ids_sent_through_the_client(client: Client, bad: str) -> None:
+    # The client percent-encodes the segment, so the server sees the literal text and refuses it
+    # with 422 (id regexp in the server's admin.go), field path partnerId / assetKey.
+    partner: PartnerInput = {
+        "name": "P",
+        "contactEmail": "p@example.com",
+        "seatCap": 1,
+        "allowedOrigins": [ORIGIN],
+        "active": True,
+    }
+    e = await status_of(client.put_partner(bad, partner))
+    assert e.status == 422 and [f.path for f in e.field_errors] == ["partnerId"]
+    e = await status_of(client.put_asset(bad, {"kind": "file", "uri": "s3://bucket/x.pdf"}))
+    assert e.status == 422 and [f.path for f in e.field_errors] == ["assetKey"]

@@ -85,7 +85,7 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Server]:
         chunks = _postgres_with_bouncer(network)
         direct, via = next(chunks)
         minio = (
-            DockerContainer("minio/minio:latest")
+            DockerContainer("minio/minio:RELEASE.2025-09-07T16-13-09Z")
             .with_env("MINIO_ROOT_USER", "minio")
             .with_env("MINIO_ROOT_PASSWORD", "minio-secret")
             .with_command("server /data")
